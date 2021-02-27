@@ -1,0 +1,15 @@
+---
+- hosts: all
+  become: true
+  become_user: root
+  tasks:
+    - name: resets k8s
+      command: kubeadm reset 
+    - name: remove net.d folder for cni 
+      command: rm -rf /etc/cni/net.d 
+    - name: remove kube config
+      command: rm $HOME/.kube/config 
+    - name: clean up ip cni0 
+      command: ip link delete cni0 
+    - name: clean up ip flannel.1 
+      command: ip link delete flannel.1
