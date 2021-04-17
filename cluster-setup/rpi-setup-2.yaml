@@ -1,0 +1,165 @@
+---
+- hosts: master, workernodes
+  become: true
+  become_user: root
+  tasks:
+    - name: 'Check mandatory variables are defined'
+      assert:
+        that:
+          - uusername is defined
+    - name: Add cgroup directives to boot command line config
+      lineinfile:
+        path: /boot/cmdline.txt
+        regexp: '((.)+?)(\scgroup_\w+=\w+)*$'
+        line: '\1 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory'
+        backrefs: yes
+    - name: Set GPU memory split to 16 MB
+      lineinfile:
+        path: /boot/config.txt
+        line: "gpu_mem=16"
+        create: yes
+    - name: Disable swap
+      block:
+        - name: Stop swap service
+          systemd:
+            name: dphys-swapfile
+            state: stopped
+            enabled: no
+          
+        - name: Remove swap file
+          command: dphys-swapfile uninstall
+          args:
+            removes: /var/swap
+    - name: Install Docker and K8s
+      block:
+        - name: Add encryption key for the Docker and K8s repository
+          apt_key:
+            url: "{{ item }}"
+            state: present
+          with_items:
+            - https://download.docker.com/linux/raspbian/gpg
+            - https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        - name: Clean Docker and K8s repository files to be idempotent
+          file:
+            name: "{{ item }}"
+            state: absent
+          with_items:
+            - /etc/apt/sources.list.d/docker.list
+            - /etc/apt/sources.list.d/kubernetes.list
+        - name: Recreate Docker and K8s repository files
+          file:
+            name: "{{ item }}"
+            state: touch
+          with_items:
+            - /etc/apt/sources.list.d/docker.list
+            - /etc/apt/sources.list.d/kubernetes.list
+        - name: Add Docker and K8s repository to the list of repositories
+          lineinfile:
+            path: /etc/apt/sources.list.d/{{ item.category }}.list
+            line: "{{ item.url }}"
+          with_items:
+            - { url: 'deb [arch=armhf] https://download.docker.com/linux/raspbian stretch stable', category: 'docker'     }
+            - { url: 'deb http://apt.kubernetes.io/ kubernetes-xenial main'                      , category: 'kubernetes' }
+        - name: Install packages to allow apt to use HTTPS repositories
+          apt:
+            name: ['apt-transport-https', 'ca-certificates', 'software-properties-common']
+            state: present
+        - name: Update list of available repositories
+          apt:
+            update_cache: yes
+        - name: Update all packages to the latest version
+          apt:
+            upgrade: dist
+        - name: Install Docker and K8s binaries
+          apt:
+            name: ['docker-ce', 'kubelet', 'kubeadm', 'kubectl', 'kubernetes-cni']
+            state: present
+        - name: adding existing user '{{ uusername }}' to group sudo
+          user:
+            name: '{{ uusername }}'
+            groups: docker
+            append: yes
+    - name: Replace Docker Config
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        src: ./dockerconfig.json
+    - name: Reboot a slow machine that might have lots of updates to apply
+      reboot:
+        reboot_timeout: 3600
+    - name: Setup iptables
+      shell: |
+        sysctl net.bridge.bridge-nf-call-iptables=1 && \
+        update-alternatives --set iptables /usr/sbin/iptables-legacy && \
+        sudo iptables -w -P FORWARD ACCEPT
+    - name: Initialize K8s Master Node
+      run_once: true
+      delegate_to: rpi-worker-1.local
+      block:          
+        - name: Kubectl init
+          shell: |
+            kubeadm init --pod-network-cidr="10.244.0.0/16" --apiserver-advertise-address={{hostvars[inventory_hostname]['ansible_default_ipv4']['address']}} --ignore-preflight-errors=Mem
+        - name: "Cluster token"
+          shell: kubeadm token list | cut -d ' ' -f1 | sed -n '2p'
+          register: K8S_TOKEN
+        - name: "CA Hash"
+          shell: openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'
+          register: K8S_MASTER_CA_HASH
+        - name: "Add K8S Token and Hash to dummy host"
+          add_host:
+            name:   "K8S_TOKEN_HOLDER"
+            token:  "{{ K8S_TOKEN.stdout }}"
+            hash:   "{{ K8S_MASTER_CA_HASH.stdout }}"
+            ip: "{{ansible_default_ipv4.address}}"
+            secure_port: "6443"
+        - name:
+          debug:
+            msg: "[Master] K8S_TOKEN_HOLDER K8S token is {{ hostvars['K8S_TOKEN_HOLDER']['token'] }}"
+        - name:
+          debug:
+            msg: "[Master] K8S_TOKEN_HOLDER K8S Hash is  {{ hostvars['K8S_TOKEN_HOLDER']['hash'] }}"
+    - name: Join Worker nodes
+      when: inventory_hostname != "rpi-worker-1.local"
+      block:
+        - name:
+          debug:
+            msg: "[Worker] K8S_TOKEN_HOLDER K8S token is {{ hostvars['K8S_TOKEN_HOLDER']['token'] }}"
+        - name:
+          debug:
+            msg: "[Worker] K8S_TOKEN_HOLDER K8S Hash is  {{ hostvars['K8S_TOKEN_HOLDER']['hash'] }}"
+        - name: "Kubeadmn join"
+          shell: >
+            kubeadm join --token={{ hostvars['K8S_TOKEN_HOLDER']['token'] }}
+            --discovery-token-ca-cert-hash sha256:{{ hostvars['K8S_TOKEN_HOLDER']['hash'] }}
+            {{hostvars['K8S_TOKEN_HOLDER']['ip']}}:{{hostvars['K8S_TOKEN_HOLDER']['secure_port']}}
+    - name: Deploy Flannel and MetalLB
+      become_user: "{{uusername}}"
+      become: true
+      run_once: true
+      delegate_to: rpi-worker-1.local
+      block:     
+        - name: chown config
+          script: >
+            mkdir -p $HOME/.kube && 
+            sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config &&
+            sudo chown $(id -u):$(id -g) $HOME/.kube/config
+        - name: Copy Flannel yaml
+          ansible.builtin.copy:
+            src: ./kube-flannel.yaml
+            dest: /kube-flannel.yaml
+        - name: Setup flannel
+          raw: kubectl apply -f /kube-flannel.yaml
+        - name: Copy MetalLB yaml
+          ansible.builtin.copy:
+            src: ./metallb.yaml
+            dest: ~/metallb.yaml
+        - name: Copy MetalLB Config yaml
+          ansible.builtin.copy:
+            src: ./metallbconfigmap.yaml
+            dest: ~/metallbconfigmap.yaml
+        - name: Setup MetalLB
+          raw: kubectl apply -f ~/metallb.yaml
+        - name: Setup MetalLB Config Map
+          raw: kubectl apply -f ~/metallbconfigmap.yaml
+        - name: Restart CoreDNS
+          raw: kubectl rollout restart deployment coredns --namespace kube-system
+    

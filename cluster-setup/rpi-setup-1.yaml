@@ -1,0 +1,59 @@
+---
+## Variables
+- hosts: workernodes, master
+  become: true
+  become_user: root
+  tasks:
+    - name: 'Check mandatory variables are defined'
+      assert:
+        that:
+          - uusername is defined
+          - ukey is defined
+    - name: Make sure we have an 'admin' group
+      group:
+        name: admin
+        state: present
+    - name: Allow 'admin' group to have passwordless sudo
+      lineinfile:
+        dest: /etc/sudoers
+        state: present
+        regexp: '^%admin'
+        line: '%admin ALL=(ALL) NOPASSWD: ALL'
+        validate: 'visudo -cf %s'
+    - name: Create user
+      user:
+        name: "{{uusername}}"
+        state: present
+        groups: admin 
+        append: yes
+        createhome: true
+      register: newuser
+    - name: Set up authorized keys for the deployer user
+      authorized_key: user={{uusername}} key="{{ukey}}"
+      with_file:
+        - /home/{{uusername}}/.ssh/id_rsa.pub
+    - name: updates a server
+      apt: 
+        update_cache: yes
+    - name: upgrade a server
+      apt: 
+        upgrade: dist
+    - name: autoremove unnecessary packages
+      apt: 
+        autoremove: yes
+    - name: autoclean system
+      apt: 
+        autoclean: yes
+    - name: Check if a reboot is required
+      register: file
+      stat: path=/var/run/reboot-required get_md5=no
+    - name: Reboot the server
+      command: /sbin/reboot
+      when: file.stat.exists == true
+    - name: Remove default pi user
+      user:
+        name: "pi"
+        remove: yes
+        state: absent
+      become: yes
+      become_user: "{{uusername}}"
