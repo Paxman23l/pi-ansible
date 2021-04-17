@@ -90,7 +90,7 @@
       shell: |
         sysctl net.bridge.bridge-nf-call-iptables=1 && \
         update-alternatives --set iptables /usr/sbin/iptables-legacy && \
-        sudo iptables -w -P FORWARD ACCEPT
+        iptables -w -P FORWARD ACCEPT
     - name: Initialize K8s Master Node
       run_once: true
       delegate_to: rpi-worker-1.local
@@ -160,6 +160,8 @@
           raw: kubectl apply -f ~/metallb.yaml
         - name: Setup MetalLB Config Map
           raw: kubectl apply -f ~/metallbconfigmap.yaml
+        - name: Setup MetalLB secrets
+          raw: kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey="$(openssl rand -base64 128)"
         - name: Restart CoreDNS
           raw: kubectl rollout restart deployment coredns --namespace kube-system
     
