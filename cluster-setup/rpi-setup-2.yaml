@@ -7,18 +7,31 @@
       assert:
         that:
           - uusername is defined
+    - name: Remove default pi user
+      become: true
+      become_user: root
+      user:
+        name: "pi"
+        remove: yes
+        state: absent
     - name: Add cgroup directives to boot command line config
+      become: true
+      become_user: root
       lineinfile:
         path: /boot/cmdline.txt
         regexp: '((.)+?)(\scgroup_\w+=\w+)*$'
         line: '\1 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory'
         backrefs: yes
     - name: Set GPU memory split to 16 MB
+      become: true
+      become_user: root
       lineinfile:
         path: /boot/config.txt
         line: "gpu_mem=16"
         create: yes
     - name: Disable swap
+      become: true
+      become_user: root
       block:
         - name: Stop swap service
           systemd:
@@ -30,7 +43,14 @@
           command: dphys-swapfile uninstall
           args:
             removes: /var/swap
+        - name: Disable swapfile
+          raw: systemctl disable dphys-swapfile
+        - name: verify swap is disabled
+          debug:
+            msg: swapon --summary
     - name: Install Docker and K8s
+      become: true
+      become_user: root
       block:
         - name: Add encryption key for the Docker and K8s repository
           apt_key:
@@ -80,74 +100,70 @@
             groups: docker
             append: yes
     - name: Replace Docker Config
+      become: true
+      become_user: root
       ansible.builtin.copy:
         dest: /etc/docker/daemon.json
         src: ./dockerconfig.json
     - name: Reboot a slow machine that might have lots of updates to apply
+      become: true
+      become_user: root
       reboot:
         reboot_timeout: 3600
-    - name: Setup iptables
+    - name: Setup iptables and disable ip 6
       shell: |
         sysctl net.bridge.bridge-nf-call-iptables=1 && \
-        update-alternatives --set iptables /usr/sbin/iptables-legacy && \
+        sudo sysctl net.ipv6.conf.all.disable_ipv6=0 && \
+        sudo sysctl net.ipv4.conf.all.forwarding=1 && \
+        update-alternatives --set iptables /usr/sbin/iptables-legacy && \        
         iptables -w -P FORWARD ACCEPT
     - name: Initialize K8s Master Node
       run_once: true
       delegate_to: rpi-worker-1.local
       block:          
+        - name: Prepull k8s images
+          shell: kubeadm config images pull -v3  
         - name: Kubectl init
           shell: |
             kubeadm init --pod-network-cidr="10.244.0.0/16" --apiserver-advertise-address={{hostvars[inventory_hostname]['ansible_default_ipv4']['address']}} --ignore-preflight-errors=Mem
-        - name: "Cluster token"
-          shell: kubeadm token list | cut -d ' ' -f1 | sed -n '2p'
-          register: K8S_TOKEN
-        - name: "CA Hash"
-          shell: openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'
-          register: K8S_MASTER_CA_HASH
+        - name: chown config # this must go before generating cluster tokens sudo rm /home/{{uusername}}/.kube/config &&
+          raw: |
+            mkdir -p /home/{{uusername}}/.kube && 
+            sudo cp -i /etc/kubernetes/admin.conf /home/{{uusername}}/.kube/config &&
+            sudo chown {{uusername}}:{{uusername}} /home/{{uusername}}/.kube/config
+        - name: Generate join command
+          command: kubeadm token create --print-join-command
+          register: join_command
+          become: true
+          become_user: "{{uusername}}"
         - name: "Add K8S Token and Hash to dummy host"
           add_host:
-            name:   "K8S_TOKEN_HOLDER"
-            token:  "{{ K8S_TOKEN.stdout }}"
-            hash:   "{{ K8S_MASTER_CA_HASH.stdout }}"
-            ip: "{{ansible_default_ipv4.address}}"
-            secure_port: "6443"
+            name: "K8S_TOKEN_HOLDER"
+            join_command: "{{join_command.stdout}}"
         - name:
           debug:
-            msg: "[Master] K8S_TOKEN_HOLDER K8S token is {{ hostvars['K8S_TOKEN_HOLDER']['token'] }}"
-        - name:
-          debug:
-            msg: "[Master] K8S_TOKEN_HOLDER K8S Hash is  {{ hostvars['K8S_TOKEN_HOLDER']['hash'] }}"
+            msg: "[Master] K8S_TOKEN_HOLDER K8S join_command is {{ hostvars['K8S_TOKEN_HOLDER']['join_command'] }}"
     - name: Join Worker nodes
       when: inventory_hostname != "rpi-worker-1.local"
       block:
         - name:
           debug:
-            msg: "[Worker] K8S_TOKEN_HOLDER K8S token is {{ hostvars['K8S_TOKEN_HOLDER']['token'] }}"
-        - name:
-          debug:
-            msg: "[Worker] K8S_TOKEN_HOLDER K8S Hash is  {{ hostvars['K8S_TOKEN_HOLDER']['hash'] }}"
+            msg: "[Worker] K8S_TOKEN_HOLDER K8S token is {{ hostvars['K8S_TOKEN_HOLDER']['join_command'] }}"
         - name: "Kubeadmn join"
-          shell: >
-            kubeadm join --token={{ hostvars['K8S_TOKEN_HOLDER']['token'] }}
-            --discovery-token-ca-cert-hash sha256:{{ hostvars['K8S_TOKEN_HOLDER']['hash'] }}
-            {{hostvars['K8S_TOKEN_HOLDER']['ip']}}:{{hostvars['K8S_TOKEN_HOLDER']['secure_port']}}
+          shell: > 
+            {{ hostvars['K8S_TOKEN_HOLDER']['join_command'] }}
     - name: Deploy Flannel and MetalLB
-      become_user: "{{uusername}}"
-      become: true
       run_once: true
       delegate_to: rpi-worker-1.local
+      become: true
+      become_user: "{{uusername}}"
       block:     
-        - name: chown config
-          script: >
-            mkdir -p $HOME/.kube && 
-            sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config &&
-            sudo chown $(id -u):$(id -g) $HOME/.kube/config
-        - name: Copy Flannel yaml
-          ansible.builtin.copy:
-            src: ./kube-flannel.yaml
-            dest: /kube-flannel.yaml
+        - name: Get Flannel file
+          get_url: 
+            url: https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+            dest: ~/kube-flannel.yml
         - name: Setup flannel
-          raw: kubectl apply -f /kube-flannel.yaml
+          raw: kubectl apply -f ~/kube-flannel.yml
         - name: Copy MetalLB yaml
           ansible.builtin.copy:
             src: ./metallb.yaml
