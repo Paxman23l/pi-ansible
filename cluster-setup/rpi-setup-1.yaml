@@ -1,6 +1,6 @@
 ---
 ## Variables
-- hosts: workernodes, master
+- hosts: master,workernodes
   become: true
   become_user: root
   tasks:
@@ -50,10 +50,4 @@
     - name: Reboot the server
       command: /sbin/reboot
       when: file.stat.exists == true
-    - name: Remove default pi user
-      user:
-        name: "pi"
-        remove: yes
-        state: absent
-      become: yes
-      become_user: "{{uusername}}"
+    

@@ -3,11 +3,12 @@
   tasks:
     - name: Deploy Flannel and MetalLB
       block:     
-        - name: chown config
-          script: >
-            mkdir -p $HOME/.kube && 
-            sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config &&
-            sudo chown $(id -u):$(id -g) $HOME/.kube/config
+        - name: Make .kube dir
+          raw: mkdir -p $HOME/.kube
+        - name: cp admin.conf
+          raw: sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+        - name: chown admin.conf
+          raw: sudo chown $(id -u):$(id -g) $HOME/.kube/config
         - name: Copy Flannel yaml
           ansible.builtin.copy:
             src: ./kube-flannel.yaml

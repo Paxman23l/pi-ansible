@@ -1,0 +1,12 @@
+- hosts: master, workernodes
+  tasks: 
+    - name: flush
+      raw: sudo iptables --flush
+    - name: flush
+      raw: sudo iptables -tnat --flush
+    - name: allow all
+      raw: sudo iptables -I INPUT -j ACCEPT
+    - name: restart kublet
+      raw: sudo systemctl start kubelet
+    - name: restart docker
+      raw: sudo systemctl start docker

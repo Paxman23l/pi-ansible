@@ -1,8 +1,8 @@
 ---
-- hosts: all
+- hosts: master, workernodes
   become: true
   become_user: root
   tasks:
-   - name: Reboot the server
+   - name: Shutdown the server
      command: /sbin/shutdown
      
