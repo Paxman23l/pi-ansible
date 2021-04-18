@@ -94,6 +94,8 @@
           apt:
             name: ['docker-ce', 'kubelet', 'kubeadm', 'kubectl', 'kubernetes-cni']
             state: present
+        - name: Mark Docker and K8s packages
+          shell: apt-mark hold kubectl kubeadm docker docker-ce kubernetes-cni
         - name: adding existing user '{{ uusername }}' to group sudo
           user:
             name: '{{ uusername }}'
