@@ -1,0 +1,138 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: traefik
+  labels:
+    app: traefik
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: traefik
+  template:
+    metadata:
+      labels:
+        app: traefik
+    spec:
+      serviceAccountName: traefik-ingress-controller
+      containers:
+        - name: traefik
+          image: traefik:latest
+          args:
+            - --log.level=DEBUG
+            - --api
+            - --api.dashboard=true
+            - --api.insecure=true
+            - --ping=true
+            - --accesslog=true
+            - --entrypoints.web.address=:80
+            - --entrypoints.websecure.address=:443
+            - --providers.kubernetescrd
+          ports:
+            - name: web
+              containerPort: 80
+            - name: websecure
+              containerPort: 443
+            - name: admin
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: admin
+            failureThreshold: 1
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: admin
+            failureThreshold: 3
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: traefik
+  externalTrafficPolicy: Cluster
+  sessionAffinity: None
+  ports:
+    - protocol: TCP
+      nodePort: 31909
+      port: 80
+      name: web
+      targetPort: 80
+    - protocol: TCP
+      nodePort: 30584
+      port: 443
+      name: websecure
+      targetPort: 443
+    - protocol: TCP
+      nodePort: 32316
+      port: 8080
+      name: admin
+      targetPort: 8080
+status:
+  loadBalancer: {}
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: https-redirect
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true
+    port: 443
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: headers-development
+spec:
+  headers:
+    isDevelopment: true
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard-https-redirect
+spec:
+  entryPoints:
+    - web
+  routes:
+  - match: Host(`local.traefik.io`)
+    kind: Rule
+    middlewares:
+      - name: https-redirect
+    services:
+    - name: api@internal
+      kind: TraefikService
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: traefik-dashboard
+spec:
+  entryPoints:
+    - websecure
+  routes:
+  - match: Host(`local.traefik.io`)
+    kind: Rule
+    services:
+    - name: api@internal
+      kind: TraefikService
+  tls:
+    certResolver: default
+    domains:
+    - main: local.traefik.io
+    sans:
+      - local.traefik.io
