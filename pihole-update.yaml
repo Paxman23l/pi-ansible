@@ -1,0 +1,11 @@
+- hosts: dns
+  become: true
+  become_user: root
+  serial: 1
+  tasks:
+    - name: Pull latest pihole image
+      command: docker pull pihole/pihole
+    - name: Stop running pihole docker-compose
+      command: docker-compose -f pihole.yaml down
+    - name: Start pihole docker-compose
+      command: docker-compose -f pihole.yaml up -d
