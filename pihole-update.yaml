@@ -3,6 +3,18 @@
   become_user: root
   serial: 1
   tasks:
+    - name: updates a server
+      apt: 
+        update_cache: yes
+    - name: upgrade a server
+      apt: 
+        upgrade: dist
+    - name: autoremove unnecessary packages
+      apt: 
+        autoremove: yes
+    - name: autoclean system
+      apt: 
+        autoclean: yes
     - name: Pull latest pihole image
       command: docker pull pihole/pihole
     - name: Stop running pihole docker-compose
